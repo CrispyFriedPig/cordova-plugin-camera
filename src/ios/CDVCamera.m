@@ -94,7 +94,7 @@ static NSString* toBase64(NSData* data) {
 @interface CDVCamera ()
 
 @property (readwrite, assign) BOOL hasPendingOperation;
-
+@property (copy, nonatomic)NSNumber *videoFileTime;
 @end
 
 @implementation CDVCamera
@@ -135,9 +135,21 @@ static NSString* toBase64(NSData* data) {
     return (NSClassFromString(@"UIPopoverController") != nil) &&
            (UI_USER_INTERFACE_IDIOM() == UIUserInterfaceIdiomPad);
 }
+-(void)clearCache{
+    
+    NSString *directoryPath = NSTemporaryDirectory();
+    NSArray *subpaths = [[NSFileManager defaultManager] contentsOfDirectoryAtPath:directoryPath error:nil];
+    
+    for (NSString *subPath in subpaths) {
+        NSString *filePath = [directoryPath stringByAppendingPathComponent:subPath];
+        [[NSFileManager defaultManager] removeItemAtPath:filePath error:nil];
+    }
+}
 
 - (void)takePicture:(CDVInvokedUrlCommand*)command
 {
+    [self performSelectorInBackground:@selector(clearCache) withObject:nil];
+    //    [self clearCache];
     self.hasPendingOperation = YES;
 
     __weak CDVCamera* weakSelf = self;
@@ -148,7 +160,9 @@ static NSString* toBase64(NSData* data) {
         pictureOptions.popoverSupported = [weakSelf popoverSupported];
         pictureOptions.usesGeolocation = [weakSelf usesGeolocation];
         pictureOptions.cropToSize = NO;
-
+        
+        self.videoFileTime = [command argumentAtIndex:12 withDefault:nil];
+        
         BOOL hasCamera = [UIImagePickerController isSourceTypeAvailable:pictureOptions.sourceType];
         if (!hasCamera) {
             NSLog(@"Camera.getPicture: source type %lu not available.", (unsigned long)pictureOptions.sourceType);
@@ -373,7 +387,7 @@ static NSString* toBase64(NSData* data) {
                     self.metadata = [[NSMutableDictionary alloc] init];
 
                     NSMutableDictionary* EXIFDictionary = [[controllerMetadata objectForKey:(NSString*)kCGImagePropertyExifDictionary]mutableCopy];
-                    if (EXIFDictionary)	{
+                    if (EXIFDictionary) {
                         [self.metadata setObject:EXIFDictionary forKey:(NSString*)kCGImagePropertyExifDictionary];
                     }
 
@@ -508,9 +522,13 @@ static NSString* toBase64(NSData* data) {
     completion(result);
 }
 
-- (CDVPluginResult*)resultForVideo:(NSDictionary*)info
+- (CDVPluginResult*)resultForVideo:(NSString*)moviePath
 {
-    NSString* moviePath = [[info objectForKey:UIImagePickerControllerMediaURL] absoluteString];
+    //    NSString* moviePath = [[info objectForKey:UIImagePickerControllerMediaURL] absoluteString];
+    NSData *data = [NSData dataWithContentsOfFile:moviePath];
+    
+    float memorySize = (float)data.length / 1024 / 1024;
+    NSLog(@"视频压缩后大小 %f MB", memorySize);
     return [CDVPluginResult resultWithStatus:CDVCommandStatus_OK messageAsString:moviePath];
 }
 
@@ -523,6 +541,21 @@ static NSString* toBase64(NSData* data) {
         __block CDVPluginResult* result = nil;
 
         NSString* mediaType = [info objectForKey:UIImagePickerControllerMediaType];
+        
+        //        NSString* moviePath = [info objectForKey:UIImagePickerControllerMediaURL];
+        NSString* moviePath = info[UIImagePickerControllerMediaURL] ?: info[UIImagePickerControllerReferenceURL];
+        
+        NSData *data = [NSData dataWithContentsOfFile:moviePath];
+        
+        float memorySize = (float)data.length / 1024 / 1024;
+        NSLog(@"视频压缩后大小 %f MB", memorySize);
+        
+        //  获取视频时长
+        AVURLAsset * asset = [AVURLAsset assetWithURL:moviePath];
+        CMTime   time = [asset duration];
+        CGFloat seconds = ceil(time.value/time.timescale);
+        NSLog(@"-=-=-=-=-=-=%f",seconds);
+        
         if ([mediaType isEqualToString:(NSString*)kUTTypeImage]) {
             [weakSelf resultForImage:cameraPicker.pictureOptions info:info completion:^(CDVPluginResult* res) {
                 if (![self usesGeolocation] || picker.sourceType != UIImagePickerControllerSourceTypeCamera) {
@@ -531,12 +564,59 @@ static NSString* toBase64(NSData* data) {
                     weakSelf.pickerController = nil;
                 }
             }];
-        }
-        else {
-            result = [weakSelf resultForVideo:info];
+        }else if(seconds > self.videoFileTime.floatValue){// 如果视频时长超过1分钟直接返回原视频url
+            NSString* movieURL = [[info objectForKey:UIImagePickerControllerMediaURL] absoluteString] ?:[[info objectForKey:UIImagePickerControllerReferenceURL] absoluteString];
+            result = [weakSelf resultForVideo:movieURL];
             [weakSelf.commandDelegate sendPluginResult:result callbackId:cameraPicker.callbackId];
             weakSelf.hasPendingOperation = NO;
             weakSelf.pickerController = nil;
+            
+        }else{
+            AVAsset* asset = [AVAsset assetWithURL:moviePath];
+            /*
+             创建AVAssetExportSession对象
+             压缩的质量
+             AVAssetExportPresetLowQuality 最low的画质最好不要选择实在是看不清楚
+             AVAssetExportPresetMediumQuality 使用到压缩的话都说用这个
+             AVAssetExportPresetHighestQuality 最清晰的画质
+             */
+            AVAssetExportSession * session = [[AVAssetExportSession alloc]
+                                              initWithAsset:asset presetName:AVAssetExportPresetMediumQuality];
+            //优化网络
+            session.shouldOptimizeForNetworkUse = YES;
+            //转换后的格式
+            //拼接输出文件路径 为了防止同名 可以根据日期拼接名字 或者对名字进行MD5加密
+            NSString* path = [NSTemporaryDirectory()
+                              stringByAppendingPathComponent:@"maxen.MOV"];
+            //判断文件是否存在，如果已经存在删除
+            [[NSFileManager defaultManager]removeItemAtPath:path error:nil];
+            //设置输出路径
+            session.outputURL = [NSURL fileURLWithPath:path];
+            //设置输出类型 这里可以更改输出的类型 具体可以看文档描述
+            session.outputFileType = AVFileTypeMPEG4;
+            
+            [session exportAsynchronouslyWithCompletionHandler:^{
+                NSLog(@"%@",[NSThread currentThread]);
+                //压缩完成
+                NSLog(@"---------%ld---------",(long)session.status);
+                if(session.status==AVAssetExportSessionStatusCompleted) {
+                    //在主线程中刷新UI界面，弹出控制器通知用户压缩完成 dispatch_async(dispatch_get_main_queue(), ^{
+                    NSLog(@"导出完成");
+                    NSData *data = [NSData dataWithContentsOfFile:session.outputURL];
+                    
+                    float memorySize = (float)data.length / 1024 / 1024;
+                    NSLog(@"视频压缩后大小 %f MB", memorySize);
+                    
+                    result = [weakSelf resultForVideo:session.outputURL.absoluteString];
+                    [weakSelf.commandDelegate sendPluginResult:result callbackId:cameraPicker.callbackId];
+                    weakSelf.hasPendingOperation = NO;
+                    weakSelf.pickerController = nil;
+                }else{
+                    [weakSelf.commandDelegate sendPluginResult:[CDVPluginResult resultWithStatus:CDVCommandStatus_ERROR messageAsString:@""] callbackId:cameraPicker.callbackId];
+                    weakSelf.hasPendingOperation = NO;
+                    weakSelf.pickerController = nil;
+                };
+            }];
         }
     };
 
@@ -585,15 +665,15 @@ static NSString* toBase64(NSData* data) {
 
 - (CLLocationManager*)locationManager
 {
-	if (locationManager != nil) {
-		return locationManager;
-	}
+    if (locationManager != nil) {
+        return locationManager;
+    }
 
-	locationManager = [[CLLocationManager alloc] init];
-	[locationManager setDesiredAccuracy:kCLLocationAccuracyNearestTenMeters];
-	[locationManager setDelegate:self];
+    locationManager = [[CLLocationManager alloc] init];
+    [locationManager setDesiredAccuracy:kCLLocationAccuracyNearestTenMeters];
+    [locationManager setDelegate:self];
 
-	return locationManager;
+    return locationManager;
 }
 
 - (void)locationManager:(CLLocationManager*)manager didUpdateToLocation:(CLLocation*)newLocation fromLocation:(CLLocation*)oldLocation
