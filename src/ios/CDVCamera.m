@@ -148,7 +148,13 @@ static NSString* toBase64(NSData* data) {
 
 - (void)takePicture:(CDVInvokedUrlCommand*)command
 {
-    [self performSelectorInBackground:@selector(clearCache) withObject:nil];
+    NSNumber *count  = [command argumentAtIndex:6 withDefault:nil];
+    if ([count intValue] == 1) {
+        NSLog(@"视频");
+        [self performSelectorInBackground:@selector(clearCache) withObject:nil];
+    }else if ([count intValue] == 0){
+        NSLog(@"图片");
+    }
     //    [self clearCache];
     self.hasPendingOperation = YES;
     
